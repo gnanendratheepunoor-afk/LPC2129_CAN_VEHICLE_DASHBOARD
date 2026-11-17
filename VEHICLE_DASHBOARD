@@ -1,0 +1,393 @@
+//HEADER.H
+#ifndef HEADER_H
+#define HEADER_H
+
+#include <lpc21xx.h>
+#include <stdio.h>
+
+typedef unsigned char u8;
+typedef signed char s8;
+typedef unsigned int u32;
+typedef signed int s32;
+
+typedef struct CAN1_MSG {
+    u32 id;
+    u32 byteA;
+    u32 byteB;
+    u8 rtr;
+    u8 dlc;
+    u8 ff;
+} CAN1;
+
+extern volatile u32 right_flag, left_flag, head_flag, flag;
+extern volatile u32 left_indi, right_indi, head_light;
+extern CAN1 r1;
+
+void delay_sec(unsigned int sec);
+void delay_ms(unsigned int ms);
+void delay_us(u32 us);
+
+void adc_init(void);
+u32 adc_read(u32 channel);
+float adc_to_temp(u32 adc);
+float adc_to_speed(u32 adc);
+int adc_to_fuel(u32 adc);
+
+void uarto_init(unsigned int baud);
+void uarto_tx(unsigned char data);
+unsigned char uarto_rx(void);
+void uarto_tx_string(char *ptr);
+void uarto_binary(int num);
+void uarto_integer(int num);
+void uarto_float(float num);
+
+void can1_rx(CAN1 *ptr);
+void can1_tx(CAN1 v);
+void can1_init(void);
+void config_vic_for_can1(void);
+
+void config_ext_intrpt0(void);
+void config_vic_for_ext_intrpt0(void);
+void config_ext_intrpt1(void);
+void config_vic_for_ext_intrpt1(void);
+void config_ext_intrpt2(void);
+void config_vic_for_ext_intrpt2(void);
+
+#endif
+//NODE-1UART-DEIVER
+
+#include "header.h"
+
+void uarto_init(unsigned int baud) {
+    unsigned int pclk, result = 0;
+    if (VPBDIV == 0x0)
+        pclk = 15000000;
+    else if (VPBDIV == 0x01)
+        pclk = 60000000;
+    else if (VPBDIV == 0x02)
+        pclk = 30000000;
+
+    result = pclk / (16 * baud);
+    PINSEL0 |= 0x05;
+    U0LCR = 0x83;
+    U0DLL = result & 0xff;
+    U0DLM = (result >> 8) & 0xff;
+    U0LCR = 0x03;
+}
+
+#define THRE ((U0LSR >> 5) & 1)
+
+void uarto_tx(unsigned char data) {
+    U0THR = data;
+    while (THRE == 0);
+}
+
+#define RDR (U0LSR & 1)
+
+unsigned char uarto_rx() {
+    while (RDR == 0);
+    return U0RBR;
+}
+
+void uarto_tx_string(char *ptr) {
+    while (*ptr != 0) {
+        uarto_tx(*ptr);
+        ptr++;
+    }
+}
+
+void uarto_integer(int num) {
+    int a[10], i = 0;
+    if (num == 0) {
+        uarto_tx('0');
+        return;
+    }
+    if (num < 0) {
+        num = -num;
+        uarto_tx('-');
+    }
+    while (num > 0) {
+        a[i] = num % 10 + 48;
+        num = num / 10;
+        i++;
+    }
+    for (i = i - 1; i >= 0; i--) {
+        uarto_tx(a[i]);
+    }
+}
+
+void uarto_float(float num) {
+    int integer;
+    if (num == 0) {
+        uarto_tx_string("0.0");
+        return;
+    }
+    if (num < 0) {
+        uarto_tx('-');
+        num = -num;
+    }
+    integer = num;
+    uarto_integer(integer);
+    integer = (num - integer) * 1000000;
+    uarto_tx('.');
+    uarto_integer(integer);
+}
+//EXT INTERRUPT
+#include "header.h"
+
+extern CAN1 v1;
+volatile u32 right_flag = 0, left_flag = 0, head_flag = 0;
+
+void config_ext_intrpt0(void) {
+    PINSEL1 = (1 << 0);
+    EXTMODE = 0x7;
+    EXTPOLAR = 0;
+}
+
+void ext_intrpt0_handler(void) __irq {
+    head_flag ^= 1;
+    if (head_flag) IOCLR0 = 1 << 21;
+    else IOSET0 = 1 << 21;
+    EXTINT = 1 << 0;
+    VICVectAddr = 0;
+}
+
+void config_vic_for_ext_intrpt0(void) {
+    VICIntSelect = 0;
+    VICVectCntl0 = 14 | (1 << 5);
+    VICVectAddr0 = (unsigned int)ext_intrpt0_handler;
+    VICIntEnable = (1 << 14);
+}
+
+void config_ext_intrpt1(void) {
+    PINSEL0 |= (1 << 29);
+    EXTMODE |= 0x7;
+    EXTPOLAR = 0;
+}
+
+void ext_intrpt1_handler(void) __irq {
+    IOSET0 = 1 << 26;
+    right_flag = 0;
+    left_flag = 1;
+    if (left_flag) {
+        IOCLR0 = 1 << 19;
+    } else {
+        IOSET0 = 1 << 19;
+    }
+    EXTINT = 1 << 1;
+    VICVectAddr = 0;
+}
+
+void config_vic_for_ext_intrpt1(void) {
+    VICIntSelect = 0;
+    VICVectCntl1 = 15 | (1 << 5);
+    VICVectAddr1 = (unsigned int)ext_intrpt1_handler;
+    VICIntEnable = (1 << 15);
+}
+
+void config_ext_intrpt2(void) {
+    PINSEL0 |= (unsigned)(1 << 31);
+    EXTMODE = 0x7;
+    EXTPOLAR |= 0;
+}
+
+void ext_intrpt2_handler(void) __irq {
+    IOSET0 = 1 << 19;
+    left_flag = 0;
+    right_flag ^= 1;
+    if (right_flag) {
+        IOCLR0 = 1 << 20;
+    } else {
+        IOSET0 = 1 << 20;
+    }
+    EXTINT = 1 << 2;
+    VICVectAddr = 0;
+}
+
+void config_vic_for_ext_intrpt2(void) {
+    VICIntSelect = 0;
+    VICVectCntl2 = 16 | (1 << 5);
+    VICVectAddr2 = (unsigned int)ext_intrpt2_handler;
+    VICIntEnable = (1 << 16);
+}
+
+//CAN DRIVER & MAIN
+void can1_init(void) {
+    VPBDIV = 1; // pclk = 60MHz
+    PINSEL1 = 0x00040000; // P0.25 --> RD1
+    C1MOD = 1; // select reset mode
+    AFMR = 2; // accept all receiving msgs
+    C1BTR = 0x001C001D; // baudrate = 125Kbps
+    C1MOD = 0; // release reset mode
+}
+
+#define RBS (C1GSR & 1)
+
+void can1_rx(CAN1 *ptr) {
+    while (RBS == 0);
+    ptr->id = C1RID;
+    ptr->dlc = (C1RFS >> 16) & 0xF;
+    ptr->rtr = (C1RFS >> 30) & 1;
+    ptr->ff = (C1RFS >> 31) & 1;
+    if (ptr->rtr == 0) {
+        ptr->byteA = C1RDA;
+        ptr->byteB = C1RDB;
+    }
+    C1CMR = 0x4;
+}
+
+#define TCS ((C1GSR >> 3) & 1)
+
+void can1_tx(CAN1 v) {
+    C1TID1 = v.id;
+    C1TFI1 = (v.dlc << 16);
+    if (v.rtr == 0) {
+        C1TDA1 = v.byteA;
+        C1TDB1 = v.byteB;
+    } else {
+        C1TFI1 |= (1 << 30);
+    }
+    C1CMR = 0x21;
+    while (TCS == 0);
+}
+
+CAN1 v1;
+
+int main() {
+    IODIR0 |= (1 << 17) | (1 << 19) | (1 << 20) | (1 << 21);
+    IOSET0 = (1 << 19) | (1 << 20) | (1 << 21);
+    can1_init();
+    adc_init();
+    uarto_init(9600);
+    config_ext_intrpt0();
+    config_vic_for_ext_intrpt0();
+    config_ext_intrpt1();
+    config_vic_for_ext_intrpt1();
+    config_ext_intrpt2();
+    config_vic_for_ext_intrpt2();
+    
+    v1.id = 0x123;
+    v1.rtr = 0;
+    v1.dlc = 8;
+    
+    while (1) {
+        v1.byteA = 0;
+        v1.byteB = 0;
+        v1.byteA = adc_read(0) & 0x3FF;
+        v1.byteA |= (adc_read(1) & 0x3FF) << 10;
+        v1.byteB = head_flag << 21;
+        v1.byteB |= right_flag << 20;
+        v1.byteB |= left_flag << 19;
+        can1_tx(v1);
+        delay_ms(2000);
+    }
+}
+
+//CAN INTERRUPT&ADC
+
+#include "header.h"
+
+volatile u32 left_indi = 0, right_indi = 0, head_light = 0;
+
+void CAN1_RX_Handler(void) __irq {
+    r1.id = C1RID;
+    r1.dlc = (C1RFS >> 16) & 0xF;
+    r1.rtr = (C1RFS >> 30) & 1;
+    if (r1.rtr == 0) {
+        r1.byteA = C1RDA;
+        r1.byteB = C1RDB;
+        left_indi = (r1.byteB >> 19) & 1;
+        right_indi = (r1.byteB >> 20) & 1;
+        head_light = (r1.byteB >> 21) & 1;
+        C1CMR = 0x4;
+        flag = 1;
+    }
+    VICVectAddr = 0;
+}
+
+void config_vic_for_can1(void) {
+    VICIntSelect = 0;
+    VICVectAddr5 = (u32)CAN1_RX_Handler;
+    VICVectCntl5 = 26 | (1 << 5);
+    VICIntEnable = (1 << 26);
+    C1IER = 1;
+}
+
+void adc_init(void) {
+    PINSEL1 = 0x15400000;
+    ADCR = 0x00200400;
+}
+
+u32 adc_read(u32 channel) {
+    ADCR = 1 << channel;
+    ADCR |= 1 << 24;
+    while (((ADDR >> 31) & 1) == 0);
+    ADCR ^= 1 << 24;
+    ADCR ^= 1 << channel;
+    return ((ADDR >> 8) & 0x3FF);
+}
+
+float adc_to_temp(u32 adc) {
+    float temp = (adc * 3.3) / 1023;
+    return temp / 0.01;
+}
+
+float adc_to_speed(u32 adc) {
+    float temp = (adc * 120) / 1023;
+    return temp;
+}
+
+int adc_to_fuel(u32 adc) {
+    return 5 * adc;
+}
+//NOE -2 MAIN
+#include "header.h"
+
+CAN1 r1;
+volatile u32 flag = 1;
+
+int main() {
+    float temp, speed, fuel;
+    can1_init();
+    uarto_init(9600);
+    config_vic_for_can1();
+    IODIR0 |= (1 << 19) | (1 << 20) | (1 << 21);
+    IOSET0 = (1 << 19) | (1 << 20) | (1 << 21);
+    
+    while (1) {
+        if (flag) {
+            flag = 0;
+            temp = adc_to_temp(r1.byteA & 0x3FF);
+            speed = adc_to_speed((r1.byteA >> 10) & 0x3FF);
+            fuel = adc_to_fuel((r1.byteA >> 20) & 0x3FF);
+            left_indi = (r1.byteB >> 19) & 1;
+            right_indi = (r1.byteB >> 20) & 1;
+            head_light = (r1.byteB >> 21) & 1;
+        }
+        
+        uarto_tx_string("TEMPERATURE: ");
+        uarto_float(temp);
+        uarto_tx_string("C\r\n");
+        uarto_tx_string("SPEED: ");
+        uarto_float(speed);
+        uarto_tx_string("km/h\r\n");
+        uarto_tx_string("FUEL LEVEL: ");
+        uarto_float(fuel);
+        uarto_tx_string("L\r\n");
+        
+        if (head_light) IOCLR0 = 1 << 21;
+        else IOSET0 = 1 << 21;
+        
+        if (left_indi) {
+            IOCLR0 = 1 << 19;
+            delay_ms(100);
+            IOSET0 = 1 << 19;
+            delay_ms(100);
+        } else if (right_indi) {
+            IOCLR0 = 1 << 20;
+            delay_ms(100);
+            IOSET0 = 1 << 20;
+            delay_ms(100);
+        }
+    }
+}
